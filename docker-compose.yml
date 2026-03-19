@@ -10,6 +10,8 @@ services:
     volumes:
       # Монтируем директорию с семплами строго в режиме Read-Only (ro)
       - ./malware_samples:/samples:ro
+      # Добавляем папку с правилами в режиме Read-Only
+      - ./yara_rules:/rules:ro
     # Ограничения ресурсов (требование ТЗ по Security)
     deploy:
       resources:
