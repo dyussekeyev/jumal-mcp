@@ -1,0 +1,8 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+yara-python==4.3.1
+pefile==2023.2.7
+lief==0.14.1
+oletools==0.60.1
+ssdeep==3.4.1
+python-magic==0.4.27
