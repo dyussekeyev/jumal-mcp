@@ -1,0 +1,11 @@
+bridge/
+.git/
+.gitignore
+LICENSE
+README.md
+*.md
+__pycache__/
+*.pyc
+.env
+malware_samples/
+yara_rules/

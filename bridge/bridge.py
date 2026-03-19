@@ -6,8 +6,8 @@ from fastmcp import FastMCP
 # Инициализация MCP-сервера
 mcp = FastMCP("MCP-Jumal", description="Junior Malware Analyst Bridge")
 
-# Адрес нашего изолированного Docker-воркера
-WORKER_URL = "http://localhost:8000/api/v1"
+# Адрес нашего изолированного Docker-воркера (configurable via env)
+WORKER_URL = os.environ.get("WORKER_URL", "http://localhost:8000/api/v1")
 
 # Получаем ключ из переменных окружения
 VT_API_KEY = os.environ.get("VT_API_KEY")
@@ -26,7 +26,7 @@ def analyze_file_triage(file_path: str) -> str:
         response = requests.post(
             f"{WORKER_URL}/triage",
             json={"file_path": file_path},
-            timeout=15  # Таймаут чуть больше, чем внутри воркера
+            timeout=60  # Таймаут чуть больше, чем внутри воркера
         )
         response.raise_for_status()
         # Возвращаем ИИ красиво отформатированный JSON в виде строки
@@ -49,7 +49,7 @@ def extract_pe_info(file_path: str) -> str:
         response = requests.post(
             f"{WORKER_URL}/pe-info",
             json={"file_path": file_path},
-            timeout=15
+            timeout=60
         )
         response.raise_for_status()
         return json.dumps(response.json(), indent=2)
@@ -145,6 +145,29 @@ def scan_yara(file_path: str) -> str:
 
     except requests.exceptions.RequestException as e:
         return f"Ошибка при связи с изолированным Worker'ом: {str(e)}"
+
+
+@mcp.tool()
+def get_strings(file_path: str, min_length: int = 4) -> str:
+    """
+    Extracts ASCII and Unicode strings from the file and identifies potential IOCs
+    (URLs, IPs, emails, file paths) using regex filters.
+    Use this tool to find embedded indicators of compromise.
+    
+    Args:
+        file_path: File name or relative path inside the samples directory.
+        min_length: Minimum string length to extract (default: 4).
+    """
+    try:
+        response = requests.post(
+            f"{WORKER_URL}/strings",
+            json={"file_path": file_path, "min_length": min_length},
+            timeout=60
+        )
+        response.raise_for_status()
+        return json.dumps(response.json(), indent=2)
+    except requests.exceptions.RequestException as e:
+        return f"Error communicating with Worker: {str(e)}"
 
 
 if __name__ == "__main__":
