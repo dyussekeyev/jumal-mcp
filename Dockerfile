@@ -35,7 +35,7 @@ COPY ./worker /app/worker
 
 # Создаем пользователя без прав root (требование ТЗ 5. Security)
 RUN useradd -m -s /bin/bash jumal_user && \
-    chown -R jumal_user:jumal_user /app
+    chown -R jumal_user:jumal_user /app /samples
 
 # Переключаемся на безопасного пользователя
 USER jumal_user
