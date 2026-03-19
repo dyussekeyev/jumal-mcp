@@ -87,6 +87,8 @@ def _compile_yara_rules() -> yara.Rules | None:
     if RULES_DIR.exists():
         for rule_file in RULES_DIR.glob("*.yar"):
             rule_filepaths[rule_file.stem] = str(rule_file)
+        for rule_file in RULES_DIR.glob("*.yara"):
+            rule_filepaths[rule_file.stem] = str(rule_file)    
     if not rule_filepaths:
         return None
     return yara.compile(filepaths=rule_filepaths)
