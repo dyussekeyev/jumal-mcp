@@ -1,6 +1,7 @@
 import os
 import hashlib
 import subprocess
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -115,12 +116,19 @@ async def analyze_file_triage(request: FileRequest):
     try:
         # Используем diec (консольную версию), ключ -j выдает JSON, но мы пока возьмем простой текст -b (brief)
         # Ограничиваем выполнение 10 секундами
-        proc = subprocess.run(
-            ["diec", "-b", str(target_file)], 
-            capture_output=True, 
-            text=True, 
-            timeout=10
+        proc = await asyncio.create_subprocess_exec(
+            "diec", "-b", str(target_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode == 0:
+                die_result = stdout.decode().strip()
+        except asyncio.TimeoutError:
+            proc.kill()
+            die_result = "Timeout: DIE scan took too long."
+        
         if proc.returncode == 0:
             die_result = proc.stdout.strip()
     except subprocess.TimeoutExpired:
