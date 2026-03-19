@@ -84,7 +84,7 @@ Restart Claude Desktop — the MCP tools will appear automatically.
 | `analyze_file_triage(file_path)` | Hashes (MD5/SHA1/SHA256/ssdeep), MIME type, entropy, imphash, and DIE scan |
 | `extract_pe_info(file_path)` | Deep PE structure analysis: imphash, sections, entropy anomalies, DLL/EXE flags |
 | `scan_yara(file_path)` | Scan with all YARA rules from the `/rules` directory |
-| `get_strings(file_path, min_length)` | Extract ASCII/Unicode strings and filter IOC candidates (IPs, URLs, emails, paths) |
+| `get_strings(file_path, min_length)` | Extract strings using FLARE FLOSS (static, decoded, stack, tight) and filter IOC candidates (IPs, URLs, emails, paths) |
 | `check_virustotal(file_hash)` | Look up a file hash on VirusTotal (requires API key) |
 
 ## Security Features
