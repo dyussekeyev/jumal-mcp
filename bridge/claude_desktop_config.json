@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "jumal-analyzer": {
+      "command": "python",
+      "args": [
+        "C:\\Path\\To\\Your\\Project\\mcp_bridge\\bridge.py"
+      ]
+    }
+  }
+}
