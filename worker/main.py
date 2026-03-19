@@ -147,7 +147,7 @@ async def extract_pe_info(request: FileRequest):
 
         return PEInfoResponse(
             imphash=imphash_val,
-            is_dll=binary.has_configuration, # Упрощенно
+            is_dll=binary.header.has_characteristic(lief.PE.Header.CHARACTERISTICS.DLL),
             is_exe=binary.header.has_characteristic(lief.PE.Header.CHARACTERISTICS.EXECUTABLE_IMAGE),
             number_of_sections=len(binary.sections),
             suspicious_sections=suspicious_sections
