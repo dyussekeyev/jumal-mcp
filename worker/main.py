@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+from functools import lru_cache
 import yara
 import lief
 import pefile
@@ -76,6 +77,18 @@ def get_safe_path(requested_path: str) -> Path:
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail=f"Invalid or unsafe file path: {str(e)}"
         )
+
+# --- Вспомогательные утилиты ---
+
+@lru_cache(maxsize=1)
+def _compile_yara_rules() -> yara.Rules | None:
+    rule_filepaths = {}
+    if RULES_DIR.exists():
+        for rule_file in RULES_DIR.glob("*.yar"):
+            rule_filepaths[rule_file.stem] = str(rule_file)
+    if not rule_filepaths:
+        return None
+    return yara.compile(filepaths=rule_filepaths)
 
 # --- Эндпоинты (Инструменты) ---
 
