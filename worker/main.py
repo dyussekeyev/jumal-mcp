@@ -1,7 +1,8 @@
-import os
 import hashlib
-import subprocess
 import asyncio
+import math
+import re
+from collections import Counter
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -9,6 +10,8 @@ from functools import lru_cache
 import yara
 import lief
 import pefile
+import ssdeep
+import magic
 
 app = FastAPI(
     title="Jumal Worker API",
@@ -32,8 +35,21 @@ class TriageResponse(BaseModel):
     md5: str
     sha1: str
     sha256: str
+    ssdeep_hash: str | None = None
+    imphash: str | None = None
     file_size: int
+    mime_type: str | None = None
+    file_entropy: float | None = None
     die_output: str | None = None
+
+class StringsRequest(BaseModel):
+    file_path: str = Field(..., description="Path to the file relative to /samples directory")
+    min_length: int = Field(4, description="Minimum string length", ge=1, le=100)
+
+class StringsResponse(BaseModel):
+    total_strings: int
+    strings: list[str]
+    ioc_candidates: dict  # keys: "urls", "ips", "emails", "file_paths"
 
 class PEInfoResponse(BaseModel):
     imphash: str | None
@@ -73,6 +89,8 @@ def get_safe_path(requested_path: str) -> Path:
         
         return full_path
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
@@ -80,6 +98,14 @@ def get_safe_path(requested_path: str) -> Path:
         )
 
 # --- Вспомогательные утилиты ---
+
+def calculate_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    counter = Counter(data)
+    length = len(data)
+    entropy = -sum((count / length) * math.log2(count / length) for count in counter.values())
+    return round(entropy, 4)
 
 @lru_cache(maxsize=1)
 def _compile_yara_rules() -> yara.Rules | None:
@@ -101,23 +127,56 @@ async def analyze_file_triage(request: FileRequest):
     Базовый триаж: хэширование и запуск Detect It Easy (diec).
     """
     target_file = get_safe_path(request.file_path)
-    
+
+    # Guard: for entropy we buffer the whole file; cap at 200 MB to stay within memory limits
+    MAX_TRIAGE_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
+    file_size = target_file.stat().st_size
+
     # 1. Считаем хэши блоками (чтобы не грузить память огромными файлами)
     md5_hash = hashlib.md5()
     sha1_hash = hashlib.sha1()
     sha256_hash = hashlib.sha256()
-    
+    # Accumulate bytes for entropy only when below the size cap
+    file_data: bytearray | None = bytearray() if file_size <= MAX_TRIAGE_FILE_SIZE else None
+
     with open(target_file, "rb") as f:
         for byte_block in iter(lambda: f.read(4096), b""):
             md5_hash.update(byte_block)
             sha1_hash.update(byte_block)
             sha256_hash.update(byte_block)
+            if file_data is not None:
+                file_data.extend(byte_block)
 
-    # 2. Запуск DIE (Detect It Easy) через subprocess с таймаутом
+    # 2. ssdeep fuzzy hash
+    ssdeep_hash = None
+    try:
+        ssdeep_hash = ssdeep.hash_from_file(str(target_file))
+    except Exception:
+        pass
+
+    # 3. MIME type via python-magic
+    mime_type = None
+    try:
+        mime_type = magic.from_file(str(target_file), mime=True)
+    except Exception:
+        pass
+
+    # 4. Shannon entropy of entire file (skipped for very large files)
+    file_entropy = calculate_entropy(bytes(file_data)) if file_data is not None else None
+
+    # 5. imphash via pefile (PE files only)
+    imphash_val = None
+    try:
+        pe = pefile.PE(str(target_file))
+        imphash_val = pe.get_imphash() or None
+        pe.close()
+    except Exception:
+        pass
+
+    # 6. Запуск DIE (Detect It Easy) через subprocess с таймаутом
     die_result = None
     try:
-        # Используем diec (консольную версию), ключ -j выдает JSON, но мы пока возьмем простой текст -b (brief)
-        # Ограничиваем выполнение 10 секундами
+        # Используем diec (консольную версию), ключ -b (brief)
         proc = await asyncio.create_subprocess_exec(
             "diec", "-b", str(target_file),
             stdout=asyncio.subprocess.PIPE,
@@ -130,11 +189,6 @@ async def analyze_file_triage(request: FileRequest):
         except asyncio.TimeoutError:
             proc.kill()
             die_result = "Timeout: DIE scan took too long."
-        
-        if proc.returncode == 0:
-            die_result = proc.stdout.strip()
-    except subprocess.TimeoutExpired:
-        die_result = "Timeout: DIE scan took too long."
     except Exception as e:
         die_result = f"Error running DIE: {e}"
 
@@ -142,7 +196,11 @@ async def analyze_file_triage(request: FileRequest):
         md5=md5_hash.hexdigest(),
         sha1=sha1_hash.hexdigest(),
         sha256=sha256_hash.hexdigest(),
-        file_size=target_file.stat().st_size,
+        ssdeep_hash=ssdeep_hash,
+        imphash=imphash_val,
+        file_size=file_size,
+        mime_type=mime_type,
+        file_entropy=file_entropy,
         die_output=die_result
     )
 
@@ -194,29 +252,79 @@ async def scan_yara(request: FileRequest):
     Сканирование файла предоставленными YARA-правилами.
     """
     target_file = get_safe_path(request.file_path)
-    
     try:
-        # Для MVP: собираем все .yar файлы из примонтированной папки
-        rule_filepaths = {}
-        if RULES_DIR.exists():
-            for rule_file in RULES_DIR.glob("*.yar"):
-                # yara.compile ожидает словарь вида {'namespace': 'path_to_file'}
-                rule_filepaths[rule_file.stem] = str(rule_file)
-
-        if not rule_filepaths:
-            return YaraResponse(matches=[], error="В папке /rules не найдено .yar файлов.")
-
-        # Компилируем правила и запускаем сканирование
-        # (В production для CERT правила лучше компилировать один раз при старте воркера, чтобы экономить время)
-        rules = yara.compile(filepaths=rule_filepaths)
+        rules = _compile_yara_rules()
+        if rules is None:
+            return YaraResponse(matches=[], error="No .yar/.yara rule files found in /rules.")
         matches = rules.match(str(target_file))
-        
-        # matches - это список объектов yara.Match. Извлекаем только имена сработавших правил
         match_names = [match.rule for match in matches]
-        
         return YaraResponse(matches=match_names)
-
     except yara.Error as e:
-        return YaraResponse(matches=[], error=f"Ошибка YARA: {str(e)}")
+        return YaraResponse(matches=[], error=f"YARA error: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка при сканировании: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal scan error: {str(e)}")
+
+
+@app.post("/api/v1/strings", response_model=StringsResponse)
+async def get_strings(request: StringsRequest):
+    """
+    Извлекает ASCII и Unicode строки из файла и фильтрует потенциальные IOC.
+    """
+    target_file = get_safe_path(request.file_path)
+    min_len = request.min_length
+
+    # Guard against loading excessively large files entirely into memory
+    MAX_STRINGS_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+    if target_file.stat().st_size > MAX_STRINGS_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large for string extraction (max 50 MB)")
+
+    with open(target_file, "rb") as f:
+        data = f.read()
+
+    # Build patterns with validated integer (Pydantic already enforces ge=1, le=100)
+    min_len_str = str(int(min_len))
+
+    # Extract ASCII strings
+    ascii_pattern = re.compile(rb'[\x20-\x7e]{' + min_len_str.encode() + rb',}')
+    ascii_strings = [m.group(0).decode("ascii") for m in ascii_pattern.finditer(data)]
+
+    # Extract Unicode (UTF-16 LE) strings
+    unicode_pattern = re.compile(rb'(?:[\x20-\x7e]\x00){' + min_len_str.encode() + rb',}')
+    unicode_strings = [m.group(0).decode("utf-16-le") for m in unicode_pattern.finditer(data)]
+
+    all_strings = ascii_strings + unicode_strings
+
+    # IOC regex filters — validated IP octet ranges (0-255)
+    ip_re = re.compile(
+        r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+    )
+    url_re = re.compile(r'https?://[^\s\'"<>]+', re.IGNORECASE)
+    email_re = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+    # Windows paths: C:\... ; Unix common sensitive paths: /etc, /usr, /bin, etc.
+    windows_path_re = re.compile(r'[a-zA-Z]:\\[^\s\'"<>]*')
+    unix_path_re = re.compile(r'/(?:etc|usr|bin|tmp|home|var|proc|sys|windows|system32)[^\s\'"<>]*', re.IGNORECASE)
+
+    urls: set[str] = set()
+    ips: set[str] = set()
+    emails: set[str] = set()
+    file_paths: set[str] = set()
+
+    for s in all_strings:
+        urls.update(url_re.findall(s))
+        ips.update(ip_re.findall(s))
+        emails.update(email_re.findall(s))
+        file_paths.update(windows_path_re.findall(s))
+        file_paths.update(unix_path_re.findall(s))
+
+    ioc_candidates = {
+        "urls": list(urls),
+        "ips": list(ips),
+        "emails": list(emails),
+        "file_paths": list(file_paths),
+    }
+
+    return StringsResponse(
+        total_strings=len(all_strings),
+        strings=all_strings,
+        ioc_candidates=ioc_candidates,
+    )

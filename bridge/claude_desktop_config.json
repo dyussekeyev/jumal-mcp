@@ -6,7 +6,8 @@
         "/path/to/jumal-mcp/bridge/bridge.py"
       ],
       "env": {
-        "VT_API_KEY": "YOUR_VIRUSTOTAL_API_KEY"
+        "VT_API_KEY": "YOUR_VIRUSTOTAL_API_KEY",
+        "WORKER_URL": "http://localhost:8000/api/v1"
       }
     }
   }

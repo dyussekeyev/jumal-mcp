@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   jumal-worker:
     build: .
@@ -13,14 +11,20 @@ services:
       # Добавляем папку с правилами в режиме Read-Only
       - ./yara_rules:/rules:ro
     # Ограничения ресурсов (требование ТЗ по Security)
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
+    mem_limit: 2g
+    cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp
     # Запрещаем контейнеру получать новые привилегии
     security_opt:
       - no-new-privileges:true
     # Сбрасываем все Linux capabilities для максимальной изоляции
     cap_drop:
       - ALL
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
