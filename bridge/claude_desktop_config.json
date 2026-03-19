@@ -3,8 +3,11 @@
     "jumal-analyzer": {
       "command": "python",
       "args": [
-        "C:\\Path\\To\\Your\\Project\\mcp_bridge\\bridge.py"
-      ]
+        "/path/to/jumal-mcp/bridge/bridge.py"
+      ],
+      "env": {
+        "VT_API_KEY": "YOUR_VIRUSTOTAL_API_KEY"
+      }
     }
   }
 }
