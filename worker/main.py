@@ -56,14 +56,21 @@ def get_safe_path(requested_path: str) -> Path:
         clean_path = requested_path.lstrip("\\/")
         full_path = (SAMPLES_DIR / clean_path).resolve()
         
-        # Проверяем, что итоговый путь действительно начинается с /samples
-        if not str(full_path).startswith(str(SAMPLES_DIR)):
-            raise ValueError("Path traversal attempt detected")
-            
+        # Надёжная проверка (Python 3.9+)
+        if not full_path.is_relative_to(SAMPLES_DIR.resolve()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Path traversal attempt detected"
+            )
+        
         if not full_path.exists() or not full_path.is_file():
-            raise ValueError("File not found")
-            
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
         return full_path
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
