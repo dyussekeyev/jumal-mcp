@@ -8,6 +8,9 @@ mcp = FastMCP("MCP-Jumal", description="Junior Malware Analyst Bridge")
 # Адрес нашего изолированного Docker-воркера
 WORKER_URL = "http://localhost:8000/api/v1"
 
+# Получаем ключ из переменных окружения
+VT_API_KEY = os.environ.get("VT_API_KEY")
+
 @mcp.tool()
 def analyze_file_triage(file_path: str) -> str:
     """
@@ -51,6 +54,62 @@ def extract_pe_info(file_path: str) -> str:
         return json.dumps(response.json(), indent=2)
     except requests.exceptions.RequestException as e:
         return f"Ошибка при связи с изолированным Worker'ом: {str(e)}"
+
+
+@mcp.tool()
+def check_virustotal(file_hash: str) -> str:
+    """
+    Проверяет репутацию файла по его хэшу (MD5, SHA-1 или SHA-256) в базе VirusTotal.
+    Используйте этот инструмент ПОСЛЕ получения хэша из инструмента analyze_file_triage.
+    Возвращает статистику детектов антивирусов и связанные теги.
+    
+    Args:
+        file_hash: Строка с хэшем файла.
+    """
+    if not VT_API_KEY:
+        return "Ошибка: Ключ VT_API_KEY не настроен на сервере."
+
+    headers = {
+        "accept": "application/json",
+        "x-apikey": VT_API_KEY
+    }
+    
+    # Используем API v3
+    url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # Если файл не найден на VT — это тоже важный индикатор (возможно, APT или уникальный семпл)
+        if response.status_code == 404:
+            return json.dumps({"status": "not_found", "message": "Семпл не найден в базе VirusTotal. Возможно, это угроза нулевого дня."})
+            
+        response.raise_for_status()
+        data = response.json().get("data", {})
+        attributes = data.get("attributes", {})
+        
+        # Извлекаем только самое важное, чтобы не переполнять контекст LLM
+        stats = attributes.get("last_analysis_stats", {})
+        result = {
+            "status": "found",
+            "meaningful_name": attributes.get("meaningful_name", "Unknown"),
+            "type_description": attributes.get("type_description", "Unknown"),
+            "reputation_score": attributes.get("reputation", 0),
+            "detections": {
+                "malicious": stats.get("malicious", 0),
+                "suspicious": stats.get("suspicious", 0),
+                "undetected": stats.get("undetected", 0)
+            },
+            "popular_threat_category": [
+                cat.get("value") 
+                for cat in attributes.get("popular_threat_classification", {}).get("popular_threat_category", [])
+            ]
+        }
+        
+        return json.dumps(result, indent=2)
+
+    except requests.exceptions.RequestException as e:
+        return f"Ошибка при запросе к VirusTotal API: {str(e)}"
 
 
 if __name__ == "__main__":
