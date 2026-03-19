@@ -112,6 +112,40 @@ def check_virustotal(file_hash: str) -> str:
         return f"Ошибка при запросе к VirusTotal API: {str(e)}"
 
 
+@mcp.tool()
+def scan_yara(file_path: str) -> str:
+    """
+    Сканирует файл локальным набором YARA-правил для выявления известных семейств ВПО, 
+    специфичных паттернов кода или криптографических констант.
+    Используйте этот инструмент для проверки файла на известные сигнатуры вашей организации.
+    
+    Args:
+        file_path: Имя файла или относительный путь внутри директории с семплами.
+    """
+    try:
+        response = requests.post(
+            f"{WORKER_URL}/yara",
+            json={"file_path": file_path},
+            timeout=30  # YARA может работать дольше, чем обычный триаж, если правил тысячи
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        if data.get("error"):
+            return json.dumps({"status": "error", "message": data["error"]}, indent=2)
+            
+        if not data.get("matches"):
+            return json.dumps({"status": "clean", "message": "Ни одно YARA правило не сработало."}, indent=2)
+            
+        return json.dumps({
+            "status": "matched",
+            "triggered_rules": data["matches"]
+        }, indent=2)
+
+    except requests.exceptions.RequestException as e:
+        return f"Ошибка при связи с изолированным Worker'ом: {str(e)}"
+
+
 if __name__ == "__main__":
     # Метод .run() по умолчанию запускает сервер в режиме stdio (стандартный ввод/вывод),
     # что является стандартом для взаимодействия с десктопными клиентами (например, Claude Desktop).
