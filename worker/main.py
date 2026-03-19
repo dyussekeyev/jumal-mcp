@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+import yara
 import lief
 import pefile
 
@@ -15,6 +16,9 @@ app = FastAPI(
 
 # Базовая директория, примонтированная в Read-Only
 SAMPLES_DIR = Path("/samples")
+
+# Базовая директория для YARA правил
+RULES_DIR = Path("/rules")
 
 # --- Модели данных (Схемы) ---
 
@@ -35,6 +39,10 @@ class PEInfoResponse(BaseModel):
     is_exe: bool
     number_of_sections: int
     suspicious_sections: list[str]
+
+class YaraResponse(BaseModel):
+    matches: list[str]
+    error: str | None = None
 
 # --- Утилиты Безопасности ---
 
@@ -149,3 +157,36 @@ async def extract_pe_info(request: FileRequest):
         raise HTTPException(status_code=400, detail="Invalid PE format for pefile")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+@app.post("/api/v1/yara", response_model=YaraResponse)
+async def scan_yara(request: FileRequest):
+    """
+    Сканирование файла предоставленными YARA-правилами.
+    """
+    target_file = get_safe_path(request.file_path)
+    
+    try:
+        # Для MVP: собираем все .yar файлы из примонтированной папки
+        rule_filepaths = {}
+        if RULES_DIR.exists():
+            for rule_file in RULES_DIR.glob("*.yar"):
+                # yara.compile ожидает словарь вида {'namespace': 'path_to_file'}
+                rule_filepaths[rule_file.stem] = str(rule_file)
+
+        if not rule_filepaths:
+            return YaraResponse(matches=[], error="В папке /rules не найдено .yar файлов.")
+
+        # Компилируем правила и запускаем сканирование
+        # (В production для CERT правила лучше компилировать один раз при старте воркера, чтобы экономить время)
+        rules = yara.compile(filepaths=rule_filepaths)
+        matches = rules.match(str(target_file))
+        
+        # matches - это список объектов yara.Match. Извлекаем только имена сработавших правил
+        match_names = [match.rule for match in matches]
+        
+        return YaraResponse(matches=match_names)
+
+    except yara.Error as e:
+        return YaraResponse(matches=[], error=f"Ошибка YARA: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка при сканировании: {str(e)}")
