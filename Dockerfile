@@ -1,11 +1,11 @@
-# Используем легковесный официальный образ Python 3.11
+# Use lightweight official Python 3.11 image
 FROM python:3.11-slim
 
-# Отключаем создание pyc файлов и буферизацию вывода (полезно для логов)
+# Disable .pyc file creation and output buffering (useful for logs)
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Устанавливаем системные зависимости для YARA, ssdeep, магии файлов и DIE
+# Install system dependencies for YARA, ssdeep, file magic, DIE, and FLOSS
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libmagic1 \
@@ -14,34 +14,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Установка Detect It Easy (CLI-версия - diec)
-# Загружаем актуальный релиз для Linux
+# Install Detect It Easy (CLI version - diec)
+# Download the current release for Linux
 RUN wget https://github.com/horsicq/Detect-It-Easy/releases/download/3.09/die_lin64_portable_3.09.zip -O /tmp/die.zip && \
     unzip /tmp/die.zip -d /opt/die && \
     ln -s /opt/die/diec /usr/local/bin/diec && \
     rm /tmp/die.zip
 
-# Создаем директории для приложения и для семплов
+# Create directories for the application and samples
 WORKDIR /app
 RUN mkdir -p /samples
 
-# Устанавливаем Python-зависимости (FastAPI, инструменты анализа)
-# Используем requirements.txt для кэширования слоев
+# Install Python dependencies (FastAPI, analysis tools)
+# Using requirements.txt for layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код воркера (создадим на Phase 2)
+# Copy worker source code
 COPY ./worker /app/worker
 
-# Создаем пользователя без прав root (требование ТЗ 5. Security)
+# Create non-root user (requirement from spec section 5. Security)
 RUN useradd -m -s /bin/bash jumal_user && \
     chown -R jumal_user:jumal_user /app /samples
 
-# Переключаемся на безопасного пользователя
+# Switch to safe user
 USER jumal_user
 
-# Открываем порт для FastAPI
+# Expose port for FastAPI
 EXPOSE 8000
 
-# Запуск FastAPI сервера через Uvicorn
+# Start FastAPI server via Uvicorn
 CMD ["uvicorn", "worker.main:app", "--host", "0.0.0.0", "--port", "8000"]

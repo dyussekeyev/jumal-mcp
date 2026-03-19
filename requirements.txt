@@ -6,3 +6,4 @@ lief==0.14.1
 oletools==0.60.1
 ssdeep==3.4.1
 python-magic==0.4.27
+flare-floss==3.1.1

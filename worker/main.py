@@ -1,5 +1,6 @@
 import hashlib
 import asyncio
+import json
 import math
 import re
 from collections import Counter
@@ -19,16 +20,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Базовая директория, примонтированная в Read-Only
+# Base directory, mounted as Read-Only
 SAMPLES_DIR = Path("/samples")
 
-# Базовая директория для YARA правил
+# Base directory for YARA rules
 RULES_DIR = Path("/rules")
 
-# --- Модели данных (Схемы) ---
+# --- Data Models (Schemas) ---
 
 class FileRequest(BaseModel):
-    # Ожидаем относительный путь или имя файла внутри /samples
+    # Expecting a relative path or filename inside /samples
     file_path: str = Field(..., description="Path to the file relative to /samples directory")
 
 class TriageResponse(BaseModel):
@@ -48,7 +49,10 @@ class StringsRequest(BaseModel):
 
 class StringsResponse(BaseModel):
     total_strings: int
-    strings: list[str]
+    static_strings: list[str]
+    decoded_strings: list[str]
+    stack_strings: list[str]
+    tight_strings: list[str]
     ioc_candidates: dict  # keys: "urls", "ips", "emails", "file_paths"
 
 class PEInfoResponse(BaseModel):
@@ -62,19 +66,19 @@ class YaraResponse(BaseModel):
     matches: list[str]
     error: str | None = None
 
-# --- Утилиты Безопасности ---
+# --- Security Utilities ---
 
 def get_safe_path(requested_path: str) -> Path:
     """
-    Критически важная функция: защита от Directory Traversal.
-    Гарантирует, что итоговый путь не выходит за пределы /samples.
+    Critical function: protection against Directory Traversal.
+    Ensures the resulting path does not escape /samples.
     """
     try:
-        # Убираем начальные слеши, чтобы путь не стал абсолютным от корня ОС
+        # Strip leading slashes so the path doesn't become absolute from OS root
         clean_path = requested_path.lstrip("\\/")
         full_path = (SAMPLES_DIR / clean_path).resolve()
         
-        # Надёжная проверка (Python 3.9+)
+        # Reliable check (Python 3.9+)
         if not full_path.is_relative_to(SAMPLES_DIR.resolve()):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -97,7 +101,7 @@ def get_safe_path(requested_path: str) -> Path:
             detail=f"Invalid or unsafe file path: {str(e)}"
         )
 
-# --- Вспомогательные утилиты ---
+# --- Helper Utilities ---
 
 def calculate_entropy(data: bytes) -> float:
     if not data:
@@ -119,12 +123,12 @@ def _compile_yara_rules() -> yara.Rules | None:
         return None
     return yara.compile(filepaths=rule_filepaths)
 
-# --- Эндпоинты (Инструменты) ---
+# --- Endpoints (Tools) ---
 
 @app.post("/api/v1/triage", response_model=TriageResponse)
 async def analyze_file_triage(request: FileRequest):
     """
-    Базовый триаж: хэширование и запуск Detect It Easy (diec).
+    Basic triage: hashing and running Detect It Easy (diec).
     """
     target_file = get_safe_path(request.file_path)
 
@@ -132,7 +136,7 @@ async def analyze_file_triage(request: FileRequest):
     MAX_TRIAGE_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
     file_size = target_file.stat().st_size
 
-    # 1. Считаем хэши блоками (чтобы не грузить память огромными файлами)
+    # 1. Compute hashes in blocks (to avoid loading huge files into memory)
     md5_hash = hashlib.md5()
     sha1_hash = hashlib.sha1()
     sha256_hash = hashlib.sha256()
@@ -173,10 +177,10 @@ async def analyze_file_triage(request: FileRequest):
     except Exception:
         pass
 
-    # 6. Запуск DIE (Detect It Easy) через subprocess с таймаутом
+    # 6. Run DIE (Detect It Easy) via subprocess with timeout
     die_result = None
     try:
-        # Используем diec (консольную версию), ключ -b (brief)
+        # Using diec (console version), -b flag (brief)
         proc = await asyncio.create_subprocess_exec(
             "diec", "-b", str(target_file),
             stdout=asyncio.subprocess.PIPE,
@@ -208,7 +212,7 @@ async def analyze_file_triage(request: FileRequest):
 @app.post("/api/v1/pe-info", response_model=PEInfoResponse)
 async def extract_pe_info(request: FileRequest):
     """
-    Глубокий анализ PE-файла. Используем pefile для imphash и LIEF для парсинга структуры.
+    Deep PE file analysis. Using pefile for imphash and LIEF for structure parsing.
     """
     target_file = get_safe_path(request.file_path)
     
@@ -216,17 +220,17 @@ async def extract_pe_info(request: FileRequest):
     imphash_val = None
     
     try:
-        # 1. Получаем imphash через pefile
+        # 1. Get imphash via pefile
         pe = pefile.PE(str(target_file))
         imphash_val = pe.get_imphash()
         pe.close()
         
-        # 2. Парсим структуру через LIEF
+        # 2. Parse structure via LIEF
         binary = lief.parse(str(target_file))
         if not isinstance(binary, lief.PE.Binary):
             raise HTTPException(status_code=400, detail="Not a valid PE file")
 
-        # Простейшая эвристика: ищем секции с аномальной энтропией (часто признак упаковщика)
+        # Simple heuristic: look for sections with anomalous entropy (often a sign of a packer)
         for section in binary.sections:
             if section.entropy > 7.5:
                 suspicious_sections.append(f"{section.name} (High Entropy: {section.entropy:.2f})")
@@ -249,7 +253,7 @@ async def extract_pe_info(request: FileRequest):
 @app.post("/api/v1/yara", response_model=YaraResponse)
 async def scan_yara(request: FileRequest):
     """
-    Сканирование файла предоставленными YARA-правилами.
+    Scan file with provided YARA rules.
     """
     target_file = get_safe_path(request.file_path)
     try:
@@ -268,31 +272,55 @@ async def scan_yara(request: FileRequest):
 @app.post("/api/v1/strings", response_model=StringsResponse)
 async def get_strings(request: StringsRequest):
     """
-    Извлекает ASCII и Unicode строки из файла и фильтрует потенциальные IOC.
+    Extracts strings from a file using FLARE FLOSS and filters potential IOCs.
     """
     target_file = get_safe_path(request.file_path)
     min_len = request.min_length
 
-    # Guard against loading excessively large files entirely into memory
-    MAX_STRINGS_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
-    if target_file.stat().st_size > MAX_STRINGS_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large for string extraction (max 50 MB)")
+    # Run FLOSS with JSON output
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "floss", "--json", str(target_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise HTTPException(status_code=504, detail="Timeout: FLOSS string extraction took too long.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running FLOSS: {e}")
 
-    with open(target_file, "rb") as f:
-        data = f.read()
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"FLOSS exited with code {proc.returncode}: {stderr.decode(errors='replace').strip()}"
+        )
 
-    # Build patterns with validated integer (Pydantic already enforces ge=1, le=100)
-    min_len_str = str(int(min_len))
+    try:
+        floss_data = json.loads(stdout.decode(errors="replace"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse FLOSS JSON output: {e}")
 
-    # Extract ASCII strings
-    ascii_pattern = re.compile(rb'[\x20-\x7e]{' + min_len_str.encode() + rb',}')
-    ascii_strings = [m.group(0).decode("ascii") for m in ascii_pattern.finditer(data)]
+    strings_section = floss_data.get("strings", {})
 
-    # Extract Unicode (UTF-16 LE) strings
-    unicode_pattern = re.compile(rb'(?:[\x20-\x7e]\x00){' + min_len_str.encode() + rb',}')
-    unicode_strings = [m.group(0).decode("utf-16-le") for m in unicode_pattern.finditer(data)]
+    def _extract_strings(items: list, min_length: int) -> list[str]:
+        result = []
+        for item in items:
+            s = item if isinstance(item, str) else item.get("string", "")
+            if len(s) >= min_length:
+                result.append(s)
+        return result
 
-    all_strings = ascii_strings + unicode_strings
+    static_strings = _extract_strings(strings_section.get("static_strings", []), min_len)
+    decoded_strings = _extract_strings(strings_section.get("decoded_strings", []), min_len)
+    stack_strings = _extract_strings(strings_section.get("stack_strings", []), min_len)
+    tight_strings = _extract_strings(strings_section.get("tight_strings", []), min_len)
+
+    all_strings = static_strings + decoded_strings + stack_strings + tight_strings
 
     # IOC regex filters — validated IP octet ranges (0-255)
     ip_re = re.compile(
@@ -325,6 +353,9 @@ async def get_strings(request: StringsRequest):
 
     return StringsResponse(
         total_strings=len(all_strings),
-        strings=all_strings,
+        static_strings=static_strings,
+        decoded_strings=decoded_strings,
+        stack_strings=stack_strings,
+        tight_strings=tight_strings,
         ioc_candidates=ioc_candidates,
     )
